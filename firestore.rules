@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      // Bootstrap Admin: info@sarmadgardezi.com
+      return isSignedIn() && (
+        request.auth.token.email == 'info@sarmadgardezi.com' || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'admin')
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Users ---
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isAdmin();
+      
+      allow create: if isSignedIn() && isOwner(userId) && 
+        incoming().keys().hasAll(['uid', 'email', 'role', 'displayName']) &&
+        incoming().uid == request.auth.uid &&
+        incoming().email == request.auth.token.email &&
+        // Only bootstrap or admin can set 'admin' role
+        (incoming().role == 'employee' || (incoming().role == 'admin' && request.auth.token.email == 'info@sarmadgardezi.com'));
+        
+      allow update: if isSignedIn() && (
+        (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'lastLogin'])) ||
+        isAdmin()
+      );
+    }
+
+    // --- Tasks ---
+    match /tasks/{taskId} {
+      allow read: if isSignedIn();
+      
+      allow create: if isAdmin() && 
+        isValidId(taskId) &&
+        incoming().assignedBy == request.auth.uid &&
+        incoming().status == 'todo' &&
+        incoming().createdAt == request.time;
+        
+      allow update: if isSignedIn() && (
+        isAdmin() || 
+        // Employee Action: Update Status
+        (existing().assignedTo == request.auth.uid && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+         incoming().updatedAt == request.time)
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    // --- Logs ---
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && 
+        incoming().userId == request.auth.uid &&
+        incoming().timestamp == request.time;
+      allow update, delete: if false;
+    }
+  }
+}
